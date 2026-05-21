@@ -335,10 +335,11 @@ async function initMySQL() {
     return;
   }
 
-  try {
-    const mysqlSsl = process.env.MYSQL_SSL;
-    const useSsl = mysqlSsl ? (mysqlSsl.trim().toLowerCase() === "true") : true;
+  const mysqlSsl = process.env.MYSQL_SSL;
+  const useSsl = mysqlSsl ? (mysqlSsl.trim().toLowerCase() === "true") : true;
+  mysqlSslEnabled = useSsl; // Set this early so fallback/failed connections still report accurate SSL config intent.
 
+  try {
     const connectionOptions: any = {
       connectTimeout: 10000,
       waitForConnections: true,
@@ -352,38 +353,86 @@ async function initMySQL() {
       };
     }
 
-    if (mysqlUrl) {
-      let cleanUrl = mysqlUrl.trim();
-      // Strip ssl-mode or sslmode query parameters cleanly without altering string-encoding of usernames/passwords
-      cleanUrl = cleanUrl.replace(/([?&])ssl[-_]mode=[^&]*/gi, "");
-      cleanUrl = cleanUrl.replace(/([?&])sslmode=[^&]*/gi, "");
-      // Clean up adjacent symbols
-      cleanUrl = cleanUrl.replace(/\?&/, "?").replace(/&&+/g, "&").replace(/[?&]$/, "");
+    let mysqlHost = host;
+    let mysqlPort = parseInt(port);
+    let mysqlUser = user;
+    let mysqlPassword = password;
+    let mysqlDatabase = database;
 
-      pool = mysql.createPool({
-        uri: cleanUrl,
-        ...connectionOptions
-      });
-      // Try to parse host info for the status page safely
-      try {
-        const match = mysqlUrl.match(/@([^/:]+)(?::(\d+))?\/([^?]+)/);
-        if (match) {
-          mysqlHostInfo = `${match[1]}:${match[2] || 3306}/${match[3]}`;
-        } else {
-          mysqlHostInfo = "Aiven Cloud Instance Connection URI";
-        }
-      } catch (e) {
-        mysqlHostInfo = "Aiven Cloud Instance Connection URI";
+    if (mysqlUrl) {
+      // Robust DB URI parser to safeguard raw, unencoded special characters (e.g., #, @, ?, /) in Aiven passwords.
+      let s = mysqlUrl.trim();
+      if (s.startsWith("mysql://")) {
+        s = s.slice(8);
+      } else if (s.startsWith("mysql2://")) {
+        s = s.slice(9);
       }
-    } else {
-      connectionOptions.host = host;
-      connectionOptions.port = parseInt(port);
-      connectionOptions.user = user;
-      connectionOptions.password = password;
-      connectionOptions.database = database;
-      pool = mysql.createPool(connectionOptions);
-      mysqlHostInfo = `${host}:${port}/${database}`;
+
+      // 1. Separate options query parameters
+      const qIdx = s.indexOf("?");
+      let connectionStringWithoutOptions = s;
+      if (qIdx !== -1) {
+        connectionStringWithoutOptions = s.slice(0, qIdx);
+      }
+
+      // 2. Separate database name (the part after the first '/' following credentials+host)
+      const slashIdx = connectionStringWithoutOptions.indexOf("/");
+      let userPassAndHost = connectionStringWithoutOptions;
+      if (slashIdx !== -1) {
+        userPassAndHost = connectionStringWithoutOptions.slice(0, slashIdx);
+        const namePart = connectionStringWithoutOptions.slice(slashIdx + 1);
+        if (namePart) {
+          mysqlDatabase = decodeURIComponent(namePart);
+        }
+      }
+
+      // 3. Separate credentials from host info by splitting at the LAST '@'
+      const lastAtIdx = userPassAndHost.lastIndexOf("@");
+      if (lastAtIdx !== -1) {
+        const credentialsPart = userPassAndHost.slice(0, lastAtIdx);
+        const hostPart = userPassAndHost.slice(lastAtIdx + 1);
+
+        // Parse credentialsPart (Username:Password) by splitting at the FIRST ':'
+        const firstColonIdx = credentialsPart.indexOf(":");
+        if (firstColonIdx !== -1) {
+          mysqlUser = decodeURIComponent(credentialsPart.slice(0, firstColonIdx));
+          mysqlPassword = decodeURIComponent(credentialsPart.slice(firstColonIdx + 1));
+        } else {
+          mysqlUser = decodeURIComponent(credentialsPart);
+        }
+
+        // Parse hostPart (Host:Port) by splitting at the LAST ':'
+        const hostColonIdx = hostPart.lastIndexOf(":");
+        if (hostColonIdx !== -1) {
+          mysqlHost = hostPart.slice(0, hostColonIdx);
+          const potentialPort = parseInt(hostPart.slice(hostColonIdx + 1), 10);
+          if (!isNaN(potentialPort)) {
+            mysqlPort = potentialPort;
+          }
+        } else {
+          mysqlHost = hostPart;
+        }
+      } else {
+        // Fallback to URL parsing if '@' is missing
+        try {
+          const u = new URL(mysqlUrl.trim());
+          mysqlHost = u.hostname;
+          mysqlPort = u.port ? parseInt(u.port) : 3306;
+          mysqlUser = u.username ? decodeURIComponent(u.username) : "";
+          mysqlPassword = u.password ? decodeURIComponent(u.password) : "";
+          mysqlDatabase = u.pathname ? decodeURIComponent(u.pathname.replace(/^\//, '')) : "defaultdb";
+        } catch (e) {}
+      }
     }
+
+    connectionOptions.host = mysqlHost;
+    connectionOptions.port = mysqlPort;
+    connectionOptions.user = mysqlUser;
+    connectionOptions.password = mysqlPassword;
+    connectionOptions.database = mysqlDatabase;
+
+    pool = mysql.createPool(connectionOptions);
+    mysqlHostInfo = `${mysqlHost}:${mysqlPort}/${mysqlDatabase}`;
 
     // Ping check
     const connection = await pool.getConnection();
@@ -391,7 +440,6 @@ async function initMySQL() {
     connection.release();
 
     mysqlConfigured = true;
-    mysqlSslEnabled = useSsl;
     mysqlStatus = "Connected (MySQL/Aiven Live)";
     console.log(`MySQL Database: Successfully connected to cloud instance at ${mysqlHostInfo}.`);
 
