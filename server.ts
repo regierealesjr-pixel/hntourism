@@ -318,6 +318,7 @@ let mysqlConfigured = false;
 let mysqlError: string | null = null;
 let mysqlStatus = "Not Configured";
 let mysqlHostInfo = "";
+let mysqlSslEnabled = false;
 
 // Aiven MySQL startup and verification
 async function initMySQL() {
@@ -335,33 +336,42 @@ async function initMySQL() {
   }
 
   try {
+    const mysqlSsl = process.env.MYSQL_SSL;
+    const useSsl = mysqlSsl ? (mysqlSsl.trim().toLowerCase() === "true") : true;
+
     const connectionOptions: any = {
-      ssl: {
-        rejectUnauthorized: false
-      },
       connectTimeout: 10000,
       waitForConnections: true,
       connectionLimit: 5,
       queueLimit: 0
     };
 
+    if (useSsl) {
+      connectionOptions.ssl = {
+        rejectUnauthorized: false
+      };
+    }
+
     if (mysqlUrl) {
-      let cleanUrl = mysqlUrl;
-      try {
-        const u = new URL(mysqlUrl);
-        u.searchParams.delete("ssl-mode");
-        u.searchParams.delete("sslmode");
-        cleanUrl = u.toString();
-      } catch (e) {}
+      let cleanUrl = mysqlUrl.trim();
+      // Strip ssl-mode or sslmode query parameters cleanly without altering string-encoding of usernames/passwords
+      cleanUrl = cleanUrl.replace(/([?&])ssl[-_]mode=[^&]*/gi, "");
+      cleanUrl = cleanUrl.replace(/([?&])sslmode=[^&]*/gi, "");
+      // Clean up adjacent symbols
+      cleanUrl = cleanUrl.replace(/\?&/, "?").replace(/&&+/g, "&").replace(/[?&]$/, "");
 
       pool = mysql.createPool({
         uri: cleanUrl,
         ...connectionOptions
       });
-      // Try to parse host info for status page
+      // Try to parse host info for the status page safely
       try {
-        const u = new URL(mysqlUrl);
-        mysqlHostInfo = `${u.hostname}:${u.port || 3306}/${u.pathname.replace(/^\//, '')}`;
+        const match = mysqlUrl.match(/@([^/:]+)(?::(\d+))?\/([^?]+)/);
+        if (match) {
+          mysqlHostInfo = `${match[1]}:${match[2] || 3306}/${match[3]}`;
+        } else {
+          mysqlHostInfo = "Aiven Cloud Instance Connection URI";
+        }
       } catch (e) {
         mysqlHostInfo = "Aiven Cloud Instance Connection URI";
       }
@@ -381,6 +391,7 @@ async function initMySQL() {
     connection.release();
 
     mysqlConfigured = true;
+    mysqlSslEnabled = useSsl;
     mysqlStatus = "Connected (MySQL/Aiven Live)";
     console.log(`MySQL Database: Successfully connected to cloud instance at ${mysqlHostInfo}.`);
 
@@ -839,7 +850,7 @@ app.get("/api/mysql-status", (req, res) => {
     status: mysqlStatus,
     hostInfo: mysqlHostInfo || "LocalStorage (SQLite mock or JSON fallback)",
     error: mysqlError,
-    ssl: mysqlConfigured
+    ssl: mysqlSslEnabled
   });
 });
 
