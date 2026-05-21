@@ -52,6 +52,26 @@ export default function AdminPanel({
   const [userError, setUserError] = useState('');
   const [userSuccess, setUserSuccess] = useState('');
 
+  const [mysqlStatus, setMysqlStatus] = useState<any>({
+    configured: false,
+    status: 'Checking...',
+    hostInfo: '',
+    error: null,
+    ssl: false
+  });
+
+  const fetchMysqlStatus = async () => {
+    try {
+      const res = await fetch('/api/mysql-status');
+      if (res.ok) {
+        const data = await res.json();
+        setMysqlStatus(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch MySQL status:", e);
+    }
+  };
+
   const fetchUsers = async () => {
     try {
       const res = await fetch('/api/users');
@@ -66,6 +86,7 @@ export default function AdminPanel({
 
   useEffect(() => {
     fetchUsers();
+    fetchMysqlStatus();
   }, [activeTab]);
 
   const handleCreateUser = async (e: React.FormEvent) => {
@@ -427,6 +448,49 @@ export default function AdminPanel({
                   <option key={d.id} value={d.id}>{d.name}</option>
                 ))}
               </select>
+            </div>
+          </div>
+
+          {/* MYSQL CLOUD DATABASE STATUS BANNER */}
+          <div className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all duration-300 ${
+            mysqlStatus.configured 
+              ? 'bg-emerald-50/55 border-emerald-200 text-emerald-950' 
+              : 'bg-amber-50/40 border-amber-150 text-amber-900'
+          }`}>
+            <div className="flex items-start gap-3 text-left">
+              <div className={`p-2.5 rounded-lg shrink-0 ${
+                mysqlStatus.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+              }`}>
+                <Database size={18} />
+              </div>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2 flex-wrap text-left">
+                  <h4 className="font-extrabold text-xs tracking-wide uppercase">
+                    {mysqlStatus.configured ? 'Aiven Cloud MySQL Database Connected' : 'Local JSON Disk Mode Active'}
+                  </h4>
+                  <span className={`px-2 py-0.5 rounded text-[8px] font-extrabold uppercase tracking-widest ${
+                    mysqlStatus.configured ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-650'
+                  }`}>
+                    {mysqlStatus.status}
+                  </span>
+                </div>
+                <p className="text-[11px] opacity-90 leading-normal text-left">
+                  {mysqlStatus.configured 
+                    ? `Live synchronization enabled. Data commits are being written securely to Aiven Cloud hosting: ${mysqlStatus.hostInfo}`
+                    : `Your data is backed up to local file system node storage. Register your MYSQL_URL or direct MySQL hosts in AI Studio Secrets to sync with your Aiven MySQL Cluster.`
+                  }
+                </p>
+                {mysqlStatus.error && (
+                  <p className="text-[10px] text-rose-600 font-mono mt-1 text-left">
+                    Error Log: {mysqlStatus.error}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 font-mono text-[9.5px] font-bold text-slate-500 bg-white/70 backdrop-blur-xs px-3 py-1.5 rounded-lg border border-slate-150 self-start sm:self-auto shrink-0">
+              <span className={`w-2 h-2 rounded-full ${mysqlStatus.configured ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
+              <span>SSL: {mysqlStatus.ssl ? 'ENABLED' : 'INACTIVE'}</span>
             </div>
           </div>
           

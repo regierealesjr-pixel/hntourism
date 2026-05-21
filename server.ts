@@ -4,6 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import mysql from "mysql2/promise";
 
 // Load environment variables
 dotenv.config();
@@ -312,14 +313,535 @@ function saveDB() {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
 }
 
+let pool: any = null;
+let mysqlConfigured = false;
+let mysqlError: string | null = null;
+let mysqlStatus = "Not Configured";
+let mysqlHostInfo = "";
+
+// Aiven MySQL startup and verification
+async function initMySQL() {
+  const mysqlUrl = process.env.MYSQL_URL;
+  const host = process.env.MYSQL_HOST;
+  const port = process.env.MYSQL_PORT || "3306";
+  const user = process.env.MYSQL_USER;
+  const password = process.env.MYSQL_PASSWORD;
+  const database = process.env.MYSQL_DATABASE || "defaultdb";
+
+  if (!mysqlUrl && !host) {
+    mysqlStatus = "Not Configured (Missing env vars)";
+    console.log("MySQL Database: No connection URI or host configured in environment. Operating in local JSON mode.");
+    return;
+  }
+
+  try {
+    const connectionOptions: any = {
+      ssl: {
+        rejectUnauthorized: false
+      },
+      connectTimeout: 10000,
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0
+    };
+
+    if (mysqlUrl) {
+      pool = mysql.createPool({
+        uri: mysqlUrl,
+        ...connectionOptions
+      });
+      // Try to parse host info for status page
+      try {
+        const u = new URL(mysqlUrl);
+        mysqlHostInfo = `${u.hostname}:${u.port || 3306}/${u.pathname.replace(/^\//, '')}`;
+      } catch (e) {
+        mysqlHostInfo = "Aiven Cloud Instance Connection URI";
+      }
+    } else {
+      connectionOptions.host = host;
+      connectionOptions.port = parseInt(port);
+      connectionOptions.user = user;
+      connectionOptions.password = password;
+      connectionOptions.database = database;
+      pool = mysql.createPool(connectionOptions);
+      mysqlHostInfo = `${host}:${port}/${database}`;
+    }
+
+    // Ping check
+    const connection = await pool.getConnection();
+    await connection.ping();
+    connection.release();
+
+    mysqlConfigured = true;
+    mysqlStatus = "Connected (MySQL/Aiven Live)";
+    console.log(`MySQL Database: Successfully connected to cloud instance at ${mysqlHostInfo}.`);
+
+    // Bootstrap tables & seed initial data
+    await bootstrapMySQLSchema();
+    await seedMySQLIfNecessary();
+
+  } catch (err: any) {
+    mysqlConfigured = false;
+    mysqlError = err.message || "Unknown database error";
+    mysqlStatus = "Connection Failed";
+    pool = null;
+    console.error("MySQL Database: Connection error. Defaulting safely to local JSON storage. Error details:", err.message);
+  }
+}
+
+async function bootstrapMySQLSchema() {
+  if (!pool) return;
+  console.log("MySQL Database: Verifying schema tables exist...");
+  
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_users (
+      id VARCHAR(255) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      email VARCHAR(255),
+      role VARCHAR(50) NOT NULL,
+      username VARCHAR(100) UNIQUE NOT NULL,
+      password VARCHAR(255) NOT NULL
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_destinations (
+      id VARCHAR(255) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      category VARCHAR(100) NOT NULL,
+      description TEXT,
+      location VARCHAR(255) NOT NULL,
+      averageRating FLOAT DEFAULT 0,
+      totalReviews INT DEFAULT 0
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_questions (
+      id VARCHAR(255) PRIMARY KEY,
+      text TEXT NOT NULL,
+      category VARCHAR(100) NOT NULL,
+      type VARCHAR(50) NOT NULL,
+      isActive BOOLEAN DEFAULT TRUE
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_responses (
+      id VARCHAR(255) PRIMARY KEY,
+      touristName VARCHAR(255) NOT NULL,
+      touristEmail VARCHAR(255),
+      nationality VARCHAR(100) NOT NULL,
+      ageGroup VARCHAR(50),
+      dateSubmitted VARCHAR(100) NOT NULL,
+      destinationId VARCHAR(255) NOT NULL,
+      answers TEXT NOT NULL,
+      feedbackText TEXT,
+      overallRating FLOAT DEFAULT 0,
+      encodedBy VARCHAR(100)
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_logs (
+      id VARCHAR(255) PRIMARY KEY,
+      timestamp VARCHAR(100) NOT NULL,
+      userRole VARCHAR(50) NOT NULL,
+      actorName VARCHAR(255) NOT NULL,
+      action VARCHAR(255) NOT NULL,
+      details TEXT
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS db_ai_reports (
+      id VARCHAR(255) PRIMARY KEY,
+      report TEXT NOT NULL,
+      generatedAt VARCHAR(100) NOT NULL
+    )
+  `);
+}
+
+async function seedMySQLIfNecessary() {
+  if (!pool) return;
+  
+  try {
+    const [users] = await pool.query("SELECT COUNT(*) as count FROM db_users");
+    if (users[0].count === 0) {
+      console.log("Seeding MySQL db_users table...");
+      for (const u of db.users) {
+        await pool.query(
+          "INSERT INTO db_users (id, name, email, role, username, password) VALUES (?, ?, ?, ?, ?, ?)",
+          [u.id, u.name, u.email || "", u.role, u.username, u.password || ""]
+        );
+      }
+    }
+
+    const [dests] = await pool.query("SELECT COUNT(*) as count FROM db_destinations");
+    if (dests[0].count === 0) {
+      console.log("Seeding MySQL db_destinations table...");
+      for (const d of db.destinations) {
+        await pool.query(
+          "INSERT INTO db_destinations (id, name, category, description, location, averageRating, totalReviews) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [d.id, d.name, d.category, d.description, d.location, d.averageRating, d.totalReviews]
+        );
+      }
+    }
+
+    const [qs] = await pool.query("SELECT COUNT(*) as count FROM db_questions");
+    if (qs[0].count === 0) {
+      console.log("Seeding MySQL db_questions table...");
+      for (const q of db.questions) {
+        await pool.query(
+          "INSERT INTO db_questions (id, text, category, type, isActive) VALUES (?, ?, ?, ?, ?)",
+          [q.id, q.text, q.category, q.type, q.isActive ? 1 : 0]
+        );
+      }
+    }
+
+    const [resps] = await pool.query("SELECT COUNT(*) as count FROM db_responses");
+    if (resps[0].count === 0) {
+      console.log("Seeding MySQL db_responses table...");
+      for (const r of db.responses) {
+        await pool.query(
+          "INSERT INTO db_responses (id, touristName, touristEmail, nationality, ageGroup, dateSubmitted, destinationId, answers, feedbackText, overallRating, encodedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [r.id, r.touristName, r.touristEmail || "", r.nationality, r.ageGroup || "", r.dateSubmitted, r.destinationId, JSON.stringify(r.answers), r.feedbackText || "", r.overallRating, r.encodedBy || "self"]
+        );
+      }
+    }
+
+    const [logs] = await pool.query("SELECT COUNT(*) as count FROM db_logs");
+    if (logs[0].count === 0) {
+      console.log("Seeding MySQL db_logs table...");
+      for (const l of db.logs) {
+        await pool.query(
+          "INSERT INTO db_logs (id, timestamp, userRole, actorName, action, details) VALUES (?, ?, ?, ?, ?, ?)",
+          [l.id, l.timestamp, l.userRole, l.actorName, l.action, l.details]
+        );
+      }
+    }
+    console.log("MySQL Database: Seeding process completed successfully.");
+  } catch (error) {
+    console.error("MySQL Database: error seeding database tables", error);
+  }
+}
+
+// Global active-fallback access wrappers
+async function getDestinations() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_destinations");
+      return rows;
+    } catch (e) {
+      console.error("MySQL getDestinations error, using memory fallback", e);
+    }
+  }
+  return db.destinations;
+}
+
+async function addDestination(dest: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "INSERT INTO db_destinations (id, name, category, description, location, averageRating, totalReviews) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [dest.id, dest.name, dest.category, dest.description, dest.location, dest.averageRating, dest.totalReviews]
+      );
+    } catch (e) {
+      console.error("MySQL addDestination error", e);
+    }
+  }
+  db.destinations.push(dest);
+  saveDB();
+}
+
+async function updateDestination(id: string, destData: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "UPDATE db_destinations SET name = ?, category = ?, description = ?, location = ?, averageRating = ?, totalReviews = ? WHERE id = ?",
+        [destData.name, destData.category, destData.description, destData.location, destData.averageRating, destData.totalReviews, id]
+      );
+    } catch (e) {
+      console.error("MySQL updateDestination error", e);
+    }
+  }
+  const idx = db.destinations.findIndex(d => d.id === id);
+  if (idx !== -1) {
+    db.destinations[idx] = { ...db.destinations[idx], ...destData };
+    saveDB();
+  }
+}
+
+async function deleteDestination(id: string) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query("DELETE FROM db_destinations WHERE id = ?", [id]);
+    } catch (e) {
+      console.error("MySQL deleteDestination error", e);
+    }
+  }
+  const idx = db.destinations.findIndex(d => d.id === id);
+  if (idx !== -1) {
+    db.destinations.splice(idx, 1);
+    saveDB();
+  }
+}
+
+async function getQuestions() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_questions");
+      return rows.map((r: any) => ({
+        ...r,
+        isActive: !!r.isActive
+      }));
+    } catch (e) {
+      console.error("MySQL getQuestions error, using memory fallback", e);
+    }
+  }
+  return db.questions;
+}
+
+async function addQuestion(q: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "INSERT INTO db_questions (id, text, category, type, isActive) VALUES (?, ?, ?, ?, ?)",
+        [q.id, q.text, q.category, q.type, q.isActive ? 1 : 0]
+      );
+    } catch (e) {
+      console.error("MySQL addQuestion error", e);
+    }
+  }
+  db.questions.push(q);
+  saveDB();
+}
+
+async function updateQuestion(id: string, qData: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "UPDATE db_questions SET text = ?, category = ?, type = ?, isActive = ? WHERE id = ?",
+        [qData.text, qData.category, qData.type, qData.isActive ? 1 : 0, id]
+      );
+    } catch (e) {
+      console.error("MySQL updateQuestion error", e);
+    }
+  }
+  const idx = db.questions.findIndex(q => q.id === id);
+  if (idx !== -1) {
+    db.questions[idx] = { ...db.questions[idx], ...qData };
+    saveDB();
+  }
+}
+
+async function deleteQuestion(id: string) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query("DELETE FROM db_questions WHERE id = ?", [id]);
+    } catch (e) {
+      console.error("MySQL deleteQuestion error", e);
+    }
+  }
+  const idx = db.questions.findIndex(q => q.id === id);
+  if (idx !== -1) {
+    db.questions.splice(idx, 1);
+    saveDB();
+  }
+}
+
+async function getUsers() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_users");
+      return rows;
+    } catch (e) {
+      console.error("MySQL getUsers error, using memory fallback", e);
+    }
+  }
+  return db.users || [];
+}
+
+async function addUser(u: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "INSERT INTO db_users (id, name, email, role, username, password) VALUES (?, ?, ?, ?, ?, ?)",
+        [u.id, u.name, u.email || "", u.role, u.username, u.password || ""]
+      );
+    } catch (e) {
+      console.error("MySQL addUser error", e);
+    }
+  }
+  if (!db.users) db.users = [];
+  db.users.push(u);
+  saveDB();
+}
+
+async function deleteUser(id: string) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query("DELETE FROM db_users WHERE id = ?", [id]);
+    } catch (e) {
+      console.error("MySQL deleteUser error", e);
+    }
+  }
+  if (db.users) {
+    const idx = db.users.findIndex(u => u.id === id);
+    if (idx !== -1) {
+      db.users.splice(idx, 1);
+      saveDB();
+    }
+  }
+}
+
+async function getResponses() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_responses ORDER BY dateSubmitted DESC");
+      return rows.map((r: any) => ({
+        ...r,
+        answers: typeof r.answers === "string" ? JSON.parse(r.answers) : r.answers
+      }));
+    } catch (e) {
+      console.error("MySQL getResponses error, using memory fallback", e);
+    }
+  }
+  return db.responses;
+}
+
+async function addResponse(resp: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "INSERT INTO db_responses (id, touristName, touristEmail, nationality, ageGroup, dateSubmitted, destinationId, answers, feedbackText, overallRating, encodedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [resp.id, resp.touristName, resp.touristEmail || "", resp.nationality, resp.ageGroup || "", resp.dateSubmitted, resp.destinationId, JSON.stringify(resp.answers), resp.feedbackText || "", resp.overallRating, resp.encodedBy || "self"]
+      );
+    } catch (e) {
+      console.error("MySQL addResponse error", e);
+    }
+  }
+  db.responses.unshift(resp);
+
+  // Recalculating the destination metadata
+  const destId = resp.destinationId;
+  const destResponses = db.responses.filter(r => r.destinationId === destId);
+  const avg = parseFloat((destResponses.reduce((acc, r) => acc + r.overallRating, 0) / destResponses.length).toFixed(1));
+  const total = destResponses.length;
+
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "UPDATE db_destinations SET averageRating = ?, totalReviews = ? WHERE id = ?",
+        [avg, total, destId]
+      );
+    } catch (e) {
+      console.error("MySQL update destination stats error", e);
+    }
+  }
+
+  const destIdx = db.destinations.findIndex(d => d.id === destId);
+  if (destIdx !== -1) {
+    db.destinations[destIdx].averageRating = avg;
+    db.destinations[destIdx].totalReviews = total;
+  }
+  saveDB();
+}
+
+async function getLogs() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_logs ORDER BY timestamp DESC");
+      return rows;
+    } catch (e) {
+      console.error("MySQL getLogs error, using memory fallback", e);
+    }
+  }
+  return db.logs;
+}
+
+async function addLog(logItem: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query(
+        "INSERT INTO db_logs (id, timestamp, userRole, actorName, action, details) VALUES (?, ?, ?, ?, ?, ?)",
+        [logItem.id, logItem.timestamp, logItem.userRole, logItem.actorName, logItem.action, logItem.details]
+      );
+    } catch (e) {
+      console.error("MySQL addLog error", e);
+    }
+  }
+  db.logs.unshift(logItem);
+  saveDB();
+}
+
+async function getAiReport() {
+  if (mysqlConfigured && pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM db_ai_reports ORDER BY generatedAt DESC LIMIT 1");
+      if (rows.length > 0) {
+        return typeof rows[0].report === "string" ? JSON.parse(rows[0].report) : rows[0].report;
+      }
+    } catch (e) {
+      console.error("MySQL getAiReport error", e);
+    }
+  }
+  return db.aiReport;
+}
+
+async function saveAiReport(report: any) {
+  if (mysqlConfigured && pool) {
+    try {
+      const reportId = "rep-" + Date.now();
+      await pool.query(
+        "INSERT INTO db_ai_reports (id, report, generatedAt) VALUES (?, ?, ?)",
+        [reportId, JSON.stringify(report), report.generatedAt || new Date().toISOString()]
+      );
+    } catch (e) {
+      console.error("MySQL saveAiReport error", e);
+    }
+  }
+  db.aiReport = report;
+  saveDB();
+}
+
+async function resetMySQL() {
+  if (mysqlConfigured && pool) {
+    try {
+      await pool.query("DROP TABLE IF EXISTS db_users");
+      await pool.query("DROP TABLE IF EXISTS db_destinations");
+      await pool.query("DROP TABLE IF EXISTS db_questions");
+      await pool.query("DROP TABLE IF EXISTS db_responses");
+      await pool.query("DROP TABLE IF EXISTS db_logs");
+      await pool.query("DROP TABLE IF EXISTS db_ai_reports");
+      await bootstrapMySQLSchema();
+      console.log("MySQL Database: Reset of cloud tables completed successfully.");
+    } catch (e) {
+      console.error("MySQL Database resetMySQL error", e);
+    }
+  }
+}
+
 // ---------------- API ENDPOINTS ----------------
 
-// Destinations
-app.get("/api/destinations", (req, res) => {
-  res.json(db.destinations);
+// 1. MySQL Connectivity Status Indicator
+app.get("/api/mysql-status", (req, res) => {
+  res.json({
+    configured: mysqlConfigured,
+    status: mysqlStatus,
+    hostInfo: mysqlHostInfo || "LocalStorage (SQLite mock or JSON fallback)",
+    error: mysqlError,
+    ssl: mysqlConfigured
+  });
 });
 
-app.post("/api/destinations", (req, res) => {
+// Destinations
+app.get("/api/destinations", async (req, res) => {
+  const list = await getDestinations();
+  res.json(list);
+});
+
+app.post("/api/destinations", async (req, res) => {
   const { name, category, description, location } = req.body;
   if (!name || !category || !location) {
     return res.status(400).json({ error: "Name, category, and location are required" });
@@ -333,80 +855,85 @@ app.post("/api/destinations", (req, res) => {
     averageRating: 0,
     totalReviews: 0
   };
-  db.destinations.push(newDest);
+  await addDestination(newDest);
 
   // Add Log
-  db.logs.unshift({
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Destination Added",
     details: `Added new destination: ${name} (${category})`
   });
 
-  saveDB();
   res.status(201).json(newDest);
 });
 
-app.put("/api/destinations/:id", (req, res) => {
+app.put("/api/destinations/:id", async (req, res) => {
   const { id } = req.params;
   const { name, category, description, location } = req.body;
-  const idx = db.destinations.findIndex(d => d.id === id);
-  if (idx === -1) {
+  
+  const originalList = await getDestinations();
+  const currentItem = originalList.find((d: any) => d.id === id);
+  if (!currentItem) {
     return res.status(404).json({ error: "Destination not found" });
   }
 
-  db.destinations[idx] = {
-    ...db.destinations[idx],
-    name: name || db.destinations[idx].name,
-    category: category || db.destinations[idx].category,
-    description: description !== undefined ? description : db.destinations[idx].description,
-    location: location || db.destinations[idx].location
+  const updatedDest = {
+    name: name || currentItem.name,
+    category: category || currentItem.category,
+    description: description !== undefined ? description : currentItem.description,
+    location: location || currentItem.location,
+    averageRating: currentItem.averageRating,
+    totalReviews: currentItem.totalReviews
   };
 
-  db.logs.unshift({
+  await updateDestination(id, updatedDest);
+
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Destination Updated",
-    details: `Modified details for: ${db.destinations[idx].name}`
+    details: `Modified details for: ${updatedDest.name}`
   });
 
-  saveDB();
-  res.json(db.destinations[idx]);
+  res.json({ id, ...updatedDest });
 });
 
-app.delete("/api/destinations/:id", (req, res) => {
+app.delete("/api/destinations/:id", async (req, res) => {
   const { id } = req.params;
-  const idx = db.destinations.findIndex(d => d.id === id);
-  if (idx === -1) {
+  const originalList = await getDestinations();
+  const currentItem = originalList.find((d: any) => d.id === id);
+  if (!currentItem) {
     return res.status(404).json({ error: "Destination not found" });
   }
-  const name = db.destinations[idx].name;
-  db.destinations.splice(idx, 1);
 
-  db.logs.unshift({
+  const name = currentItem.name;
+  await deleteDestination(id);
+
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Destination Deleted",
     details: `Removed destination: ${name}`
   });
 
-  saveDB();
   res.json({ message: "Destination deleted" });
 });
 
 
 // Questions Group
-app.get("/api/questions", (req, res) => {
-  res.json(db.questions);
+app.get("/api/questions", async (req, res) => {
+  const list = await getQuestions();
+  res.json(list);
 });
 
-app.post("/api/questions", (req, res) => {
+app.post("/api/questions", async (req, res) => {
   const { text, category, type } = req.body;
   if (!text || !category || !type) {
     return res.status(400).json({ error: "Text, category, and type are required" });
@@ -419,78 +946,81 @@ app.post("/api/questions", (req, res) => {
     type,
     isActive: true
   };
-  db.questions.push(newQ);
+  await addQuestion(newQ);
 
-  db.logs.unshift({
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Survey Question Added",
     details: `Created new ${category} question.`
   });
 
-  saveDB();
   res.status(201).json(newQ);
 });
 
-app.put("/api/questions/:id", (req, res) => {
+app.put("/api/questions/:id", async (req, res) => {
   const { id } = req.params;
   const { text, category, type, isActive } = req.body;
-  const idx = db.questions.findIndex(q => q.id === id);
-  if (idx === -1) {
+  
+  const originalList = await getQuestions();
+  const currentItem = originalList.find((q: any) => q.id === id);
+  if (!currentItem) {
     return res.status(404).json({ error: "Question not found" });
   }
 
-  db.questions[idx] = {
-    ...db.questions[idx],
-    text: text !== undefined ? text : db.questions[idx].text,
-    category: category !== undefined ? category : db.questions[idx].category,
-    type: type !== undefined ? type : db.questions[idx].type,
-    isActive: isActive !== undefined ? isActive : db.questions[idx].isActive
+  const updatedQ = {
+    text: text !== undefined ? text : currentItem.text,
+    category: category !== undefined ? category : currentItem.category,
+    type: type !== undefined ? type : currentItem.type,
+    isActive: isActive !== undefined ? !!isActive : currentItem.isActive
   };
 
-  db.logs.unshift({
+  await updateQuestion(id, updatedQ);
+
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Survey Question Updated",
     details: `Updated configuration of survey question ${id}.`
   });
 
-  saveDB();
-  res.json(db.questions[idx]);
+  res.json({ id, ...updatedQ });
 });
 
-app.delete("/api/questions/:id", (req, res) => {
+app.delete("/api/questions/:id", async (req, res) => {
   const { id } = req.params;
-  const idx = db.questions.findIndex(q => q.id === id);
-  if (idx === -1) {
+  const originalList = await getQuestions();
+  const currentItem = originalList.find((q: any) => q.id === id);
+  if (!currentItem) {
     return res.status(404).json({ error: "Question not found" });
   }
-  db.questions.splice(idx, 1);
 
-  db.logs.unshift({
+  await deleteQuestion(id);
+
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
-    actorName: "Tourism Officer",
+    actorName: "Director Rose ann Sumacot",
     action: "Survey Question Deleted",
     details: `Deleted question ID ${id}.`
   });
 
-  saveDB();
   res.json({ message: "Question deleted" });
 });
 
 
 // Survey responses
-app.get("/api/responses", (req, res) => {
-  res.json(db.responses);
+app.get("/api/responses", async (req, res) => {
+  const list = await getResponses();
+  res.json(list);
 });
 
-app.post("/api/responses", (req, res) => {
+app.post("/api/responses", async (req, res) => {
   const { touristName, touristEmail, nationality, ageGroup, destinationId, answers, feedbackText, encodedBy } = req.body;
 
   if (!touristName || !nationality || !destinationId || !answers) {
@@ -500,8 +1030,10 @@ app.post("/api/responses", (req, res) => {
   // Calculate overallRating based on the numeric rating answers
   let totalRatingSum = 0;
   let ratingCount = 0;
+  const currentQuestions = await getQuestions();
+  
   for (const qId of Object.keys(answers)) {
-    const question = db.questions.find(q => q.id === qId);
+    const question = currentQuestions.find((q: any) => q.id === qId);
     if (question && question.type === "rating" && typeof answers[qId] === "number") {
       totalRatingSum += answers[qId];
       ratingCount++;
@@ -523,51 +1055,46 @@ app.post("/api/responses", (req, res) => {
     encodedBy: encodedBy || "self"
   };
 
-  db.responses.unshift(newResponse);
+  await addResponse(newResponse);
 
-  // Re-calculate the averageRating and totalReviews for the Destination
-  const destIdx = db.destinations.findIndex(d => d.id === destinationId);
-  if (destIdx !== -1) {
-    const destResponses = db.responses.filter(r => r.destinationId === destinationId);
-    const avg = parseFloat((destResponses.reduce((acc, r) => acc + r.overallRating, 0) / destResponses.length).toFixed(1));
-    db.destinations[destIdx].averageRating = avg;
-    db.destinations[destIdx].totalReviews = destResponses.length;
-  }
+  const currentDests = await getDestinations();
+  const destItem = currentDests.find((d: any) => d.id === destinationId);
 
   // Create audit activity log item
   const isStaff = encodedBy && encodedBy !== "self";
-  db.logs.unshift({
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: isStaff ? "Staff" : "Tourist",
     actorName: isStaff ? encodedBy : touristName,
     action: "Survey Response Submitted",
-    details: `Survey submitted for ${db.destinations[destIdx]?.name || 'Destination'}. Average satisfaction: ${overallRating}/5`
+    details: `Survey submitted for ${destItem?.name || 'Destination'}. Average satisfaction: ${overallRating}/5`
   });
 
-  saveDB();
   res.status(201).json(newResponse);
 });
 
 
 // Audit logs
-app.get("/api/logs", (req, res) => {
-  res.json(db.logs);
+app.get("/api/logs", async (req, res) => {
+  const list = await getLogs();
+  res.json(list);
 });
 
 
 // User Accounts Group Admin Controller
-app.get("/api/users", (req, res) => {
-  res.json(db.users || []);
+app.get("/api/users", async (req, res) => {
+  const list = await getUsers();
+  res.json(list);
 });
 
-app.post("/api/users", (req, res) => {
+app.post("/api/users", async (req, res) => {
   const { name, email, role, username, password } = req.body;
   if (!name || !role || !username || !password) {
     return res.status(400).json({ error: "Name, role, username, and password are required" });
   }
 
-  const userList = db.users || [];
+  const userList = await getUsers();
   const exists = userList.some((u: any) => u.username.toLowerCase() === username.trim().toLowerCase());
   if (exists) {
     return res.status(400).json({ error: "Username already registered" });
@@ -582,12 +1109,9 @@ app.post("/api/users", (req, res) => {
     password: password.trim()
   };
 
-  if (!db.users) {
-    db.users = [];
-  }
-  db.users.push(newUser);
+  await addUser(newUser);
 
-  db.logs.unshift({
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
@@ -596,36 +1120,32 @@ app.post("/api/users", (req, res) => {
     details: `Created new ${role} account for ${name} (username: ${username})`
   });
 
-  saveDB();
   res.status(201).json(newUser);
 });
 
-app.delete("/api/users/:id", (req, res) => {
+app.delete("/api/users/:id", async (req, res) => {
   const { id } = req.params;
-  const userList = db.users || [];
-  const idx = userList.findIndex((u: any) => u.id === id);
-  if (idx === -1) {
+  const userList = await getUsers();
+  const currentU = userList.find((u: any) => u.id === id);
+  if (!currentU) {
     return res.status(404).json({ error: "User account not found" });
   }
 
-  const targetUser = userList[idx];
-  if (targetUser.username === "admin") {
+  if (currentU.username === "admin") {
     return res.status(400).json({ error: "Cannot delete primary Administrator account" });
   }
 
-  userList.splice(idx, 1);
-  db.users = userList;
+  await deleteUser(id);
 
-  db.logs.unshift({
+  await addLog({
     id: "log-" + Date.now(),
     timestamp: new Date().toISOString(),
     userRole: "Admin",
     actorName: "Director Rose ann Sumacot",
     action: "Deleted User Account",
-    details: `Removed accounts access for ${targetUser.role} member: ${targetUser.name}`
+    details: `Removed accounts access for ${currentU.role} member: ${currentU.name}`
   });
 
-  saveDB();
   res.json({ message: "Account deleted successfully" });
 });
 
@@ -687,10 +1207,11 @@ app.post("/api/ai-report/generate", async (req, res) => {
         generatedAt: new Date().toISOString()
       }
     ];
-    db.aiReport = sampleReports[0];
-    saveDB();
+    
+    await saveAiReport(sampleReports[0]);
+    
     return res.json({
-      report: db.aiReport,
+      report: sampleReports[0],
       isDemo: true,
       message: "This is a preconfigured high-fidelity analysis for Hinunangan. To fetch live dynamic evaluations using your database responses, configure your GEMINI_API_KEY in Settings."
     });
@@ -706,13 +1227,17 @@ app.post("/api/ai-report/generate", async (req, res) => {
       }
     });
 
+    const activeResponses = await getResponses();
+    const activeDests = await getDestinations();
+    const activeQuestions = await getQuestions();
+
     // Let's summarize our dataset for Gemini to analyze
     const summaryData = {
-      totalResponses: db.responses.length,
-      destinations: db.destinations.map(d => ({ name: d.name, category: d.category, totalReviews: d.totalReviews, averageRating: d.averageRating })),
-      questions: db.questions.filter(q => q.isActive).map(q => ({ text: q.text, category: q.category })),
-      recentFeedbackList: db.responses.slice(0, 15).map(r => ({
-        destination: db.destinations.find(d => d.id === r.destinationId)?.name || 'Unknown',
+      totalResponses: activeResponses.length,
+      destinations: activeDests.map((d: any) => ({ name: d.name, category: d.category, totalReviews: d.totalReviews, averageRating: d.averageRating })),
+      questions: activeQuestions.filter((q: any) => q.isActive).map((q: any) => ({ text: q.text, category: q.category })),
+      recentFeedbackList: activeResponses.slice(0, 15).map((r: any) => ({
+        destination: activeDests.find((d: any) => d.id === r.destinationId)?.name || 'Unknown',
         rating: r.overallRating,
         feedback: r.feedbackText,
         nationality: r.nationality
@@ -753,11 +1278,10 @@ Return ONLY this JSON. Do not write any markdown codeblock backticks or conversa
     const parsedReport = JSON.parse(response.text.trim());
     parsedReport.generatedAt = new Date().toISOString();
 
-    db.aiReport = parsedReport;
-    saveDB();
+    await saveAiReport(parsedReport);
 
     res.json({
-      report: db.aiReport,
+      report: parsedReport,
       isDemo: false
     });
   } catch (error: any) {
@@ -768,21 +1292,32 @@ Return ONLY this JSON. Do not write any markdown codeblock backticks or conversa
 
 
 // Get existing AI report
-app.get("/api/ai-report", (req, res) => {
-  res.json(db.aiReport);
+app.get("/api/ai-report", async (req, res) => {
+  const r = await getAiReport();
+  res.json(r);
 });
 
 
 // RESET DB back to default (useful for testing)
-app.post("/api/reset-db", (req, res) => {
-  fs.unlinkSync(DB_FILE);
+app.post("/api/reset-db", async (req, res) => {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      fs.unlinkSync(DB_FILE);
+    }
+  } catch (e) {}
+  
   db = initDB();
+  await resetMySQL();
   res.json({ message: "Database reset to factory defaults", db });
 });
 
 
+
 // Vite middleware/Static serving
 async function startServer() {
+  // Try initializing cloud database connection prior to routing assets
+  await initMySQL();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
