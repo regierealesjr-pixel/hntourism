@@ -320,14 +320,40 @@ let mysqlStatus = "Not Configured";
 let mysqlHostInfo = "";
 let mysqlSslEnabled = false;
 
+function safeDecode(val: string): string {
+  try {
+    return decodeURIComponent(val);
+  } catch (e) {
+    return val;
+  }
+}
+
+function cleanEnvValue(val: string | undefined): string {
+  if (!val) return "";
+  let s = val.trim();
+  // Strip enclosing double or single quotes if present (common copy-paste/config errors)
+  while ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+function censorPassword(p: string | undefined): string {
+  if (!p) return "(empty)";
+  const trimmed = p.trim();
+  if (trimmed.length === 0) return "(empty/whitespace)";
+  if (trimmed.length <= 4) return "*".repeat(trimmed.length);
+  return trimmed.slice(0, 2) + "*".repeat(trimmed.length - 4) + trimmed.slice(-2);
+}
+
 // Aiven MySQL startup and verification
 async function initMySQL() {
-  const mysqlUrl = process.env.MYSQL_URL;
-  const host = process.env.MYSQL_HOST;
-  const port = process.env.MYSQL_PORT || "3306";
-  const user = process.env.MYSQL_USER;
-  const password = process.env.MYSQL_PASSWORD;
-  const database = process.env.MYSQL_DATABASE || "defaultdb";
+  const mysqlUrl = cleanEnvValue(process.env.MYSQL_URL);
+  const host = cleanEnvValue(process.env.MYSQL_HOST);
+  const port = cleanEnvValue(process.env.MYSQL_PORT) || "3306";
+  const user = cleanEnvValue(process.env.MYSQL_USER);
+  const password = cleanEnvValue(process.env.MYSQL_PASSWORD);
+  const database = cleanEnvValue(process.env.MYSQL_DATABASE) || "defaultdb";
 
   if (!mysqlUrl && !host) {
     mysqlStatus = "Not Configured (Missing env vars)";
@@ -335,9 +361,16 @@ async function initMySQL() {
     return;
   }
 
-  const mysqlSsl = process.env.MYSQL_SSL;
-  const useSsl = mysqlSsl ? (mysqlSsl.trim().toLowerCase() === "true") : true;
+  const mysqlSsl = cleanEnvValue(process.env.MYSQL_SSL);
+  const useSsl = mysqlSsl ? (mysqlSsl.toLowerCase() === "true") : true;
   mysqlSslEnabled = useSsl; // Set this early so fallback/failed connections still report accurate SSL config intent.
+
+  // Diagnostic trace holders for failure analysis
+  let mysqlHost = host;
+  let mysqlPort = parseInt(port);
+  let mysqlUser = user;
+  let mysqlPassword = password;
+  let mysqlDatabase = database;
 
   try {
     const connectionOptions: any = {
@@ -353,15 +386,9 @@ async function initMySQL() {
       };
     }
 
-    let mysqlHost = host;
-    let mysqlPort = parseInt(port);
-    let mysqlUser = user;
-    let mysqlPassword = password;
-    let mysqlDatabase = database;
-
     if (mysqlUrl) {
       // Robust DB URI parser to safeguard raw, unencoded special characters (e.g., #, @, ?, /) in Aiven passwords.
-      let s = mysqlUrl.trim();
+      let s = mysqlUrl;
       if (s.startsWith("mysql://")) {
         s = s.slice(8);
       } else if (s.startsWith("mysql2://")) {
@@ -382,7 +409,7 @@ async function initMySQL() {
         userPassAndHost = connectionStringWithoutOptions.slice(0, slashIdx);
         const namePart = connectionStringWithoutOptions.slice(slashIdx + 1);
         if (namePart) {
-          mysqlDatabase = decodeURIComponent(namePart);
+          mysqlDatabase = safeDecode(namePart);
         }
       }
 
@@ -395,10 +422,10 @@ async function initMySQL() {
         // Parse credentialsPart (Username:Password) by splitting at the FIRST ':'
         const firstColonIdx = credentialsPart.indexOf(":");
         if (firstColonIdx !== -1) {
-          mysqlUser = decodeURIComponent(credentialsPart.slice(0, firstColonIdx));
-          mysqlPassword = decodeURIComponent(credentialsPart.slice(firstColonIdx + 1));
+          mysqlUser = safeDecode(credentialsPart.slice(0, firstColonIdx));
+          mysqlPassword = safeDecode(credentialsPart.slice(firstColonIdx + 1));
         } else {
-          mysqlUser = decodeURIComponent(credentialsPart);
+          mysqlUser = safeDecode(credentialsPart);
         }
 
         // Parse hostPart (Host:Port) by splitting at the LAST ':'
@@ -415,15 +442,21 @@ async function initMySQL() {
       } else {
         // Fallback to URL parsing if '@' is missing
         try {
-          const u = new URL(mysqlUrl.trim());
+          const u = new URL(mysqlUrl);
           mysqlHost = u.hostname;
           mysqlPort = u.port ? parseInt(u.port) : 3306;
-          mysqlUser = u.username ? decodeURIComponent(u.username) : "";
-          mysqlPassword = u.password ? decodeURIComponent(u.password) : "";
-          mysqlDatabase = u.pathname ? decodeURIComponent(u.pathname.replace(/^\//, '')) : "defaultdb";
+          mysqlUser = u.username ? safeDecode(u.username) : "";
+          mysqlPassword = u.password ? safeDecode(u.password) : "";
+          mysqlDatabase = u.pathname ? safeDecode(u.pathname.replace(/^\//, '')) : "defaultdb";
         } catch (e) {}
       }
     }
+
+    // Clean individual components in case user entered them but with lingering whitespace/quotes inside URL
+    mysqlHost = mysqlHost.trim();
+    mysqlUser = mysqlUser.trim();
+    mysqlPassword = mysqlPassword.trim();
+    mysqlDatabase = mysqlDatabase.trim();
 
     connectionOptions.host = mysqlHost;
     connectionOptions.port = mysqlPort;
@@ -449,10 +482,23 @@ async function initMySQL() {
 
   } catch (err: any) {
     mysqlConfigured = false;
-    mysqlError = err.message || "Unknown database error";
+    let errMsg = err.message || "Unknown database error";
+    
+    // Build diagnostic summary for visual double checking
+    const diagSummary = `[Diagnostics - Host: ${mysqlHost || "Unresolved"}, User: '${mysqlUser || "Unresolved"}', Object DB: '${mysqlDatabase || "Unresolved"}', Port: ${mysqlPort || "Unresolved"}, Password Length: ${mysqlPassword ? mysqlPassword.length : 0} (Value: ${censorPassword(mysqlPassword)})]`;
+    
+    const isRedacted = mysqlPassword && (mysqlPassword.toLowerCase() === "<redacted>" || mysqlPassword.toLowerCase().includes("<redacted>"));
+
+    if (errMsg.includes("Access denied") || err.code === "ER_ACCESS_DENIED_ERROR") {
+      errMsg = `${errMsg} \n\n${diagSummary}\n\n🔒 HOW TO SOLVE:\n1. ${isRedacted ? "⚠️ ALERT: Your password is set to the literal placeholder '<redacted>'! Please replace this placeholder with your ACTUAL private database password from your Aiven Console." : "Verify your password doesn't contain a typo or copied quotes."}\n2. Ensure the database name '${mysqlDatabase}' exists on your Aiven instance (if you specify one other than 'defaultdb', you must pre-create it in Aiven console).\n3. Double check 'Allowed IP addresses' (IP filters) is set to '0.0.0.0/0' to let your Render servers handshake successfully!`;
+    } else {
+      errMsg = `${errMsg} \n\n${diagSummary}${isRedacted ? "\n\n⚠️ ALERT: Your password is set to the literal placeholder '<redacted>'! Please replace this placeholder with your ACTUAL private database password from your Aiven Console." : ""}`;
+    }
+    
+    mysqlError = errMsg;
     mysqlStatus = "Connection Failed";
     pool = null;
-    console.error("MySQL Database: Connection error. Defaulting safely to local JSON storage. Error details:", err.message);
+    console.error("MySQL Database: Connection error. Defaulting safely to local JSON storage. Error details:", errMsg);
   }
 }
 

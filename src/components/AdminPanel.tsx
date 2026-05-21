@@ -480,11 +480,32 @@ export default function AdminPanel({
                     : `Your data is backed up to local file system node storage. Register your MYSQL_URL or direct MySQL hosts in AI Studio Secrets to sync with your Aiven MySQL Cluster.`
                   }
                 </p>
-                {mysqlStatus.error && (
-                  <p className="text-[10px] text-rose-600 font-mono mt-1 text-left">
-                    Error Log: {mysqlStatus.error}
-                  </p>
-                )}
+                 {mysqlStatus.error && (
+                   <div className="mt-3.5 p-4 bg-rose-50/70 border border-rose-200/60 rounded-xl text-left space-y-2.5 max-w-2xl">
+                     <span className="font-extrabold text-rose-800 text-[11px] flex items-center gap-1.5 font-sans uppercase tracking-wider">
+                       <ShieldAlert size={14} className="text-rose-600 shrink-0" />
+                       Database Connection Denied
+                     </span>
+                     <p className="text-rose-700 text-[10.5px] font-mono leading-relaxed bg-white p-2.5 rounded-lg border border-rose-100 shadow-3xs overflow-x-auto whitespace-pre-wrap">
+                       {mysqlStatus.error}
+                     </p>
+                     {mysqlStatus.error.toLowerCase().includes("access denied") && (
+                       <div className="pt-2.5 border-t border-rose-200/40 text-slate-700 space-y-2 font-sans text-xs">
+                         <strong className="text-slate-900 text-[11.5px] block font-extrabold">🛡️ Action Required: Authorize Connection in Aiven Console</strong>
+                         <p className="text-[11px] text-slate-600 leading-normal font-medium">
+                           Aiven MySQL protects your cluster by rejecting unrecognized network access. To allow your Hinunangan Tourism app (running on Render and AI Studio development containers) to connect successfully:
+                         </p>
+                         <ol className="list-decimal list-inside text-[11px] text-slate-700 font-medium space-y-1.5 pl-1 bg-white/70 p-3 rounded-lg border border-slate-150 leading-relaxed">
+                           <li>Log in to your <a href="https://console.aiven.io" target="_blank" rel="noopener noreferrer" className="text-sky-600 hover:underline font-bold inline-flex items-center gap-0.5">Aiven Console</a></li>
+                           <li>Open your <strong>MySQL database service</strong> details card</li>
+                           <li>In the main <strong>Overview</strong> tab, scroll down to the <strong>Allowed IP addresses</strong> section (IP filters)</li>
+                           <li>Click <strong>+ Add IP filter</strong> and enter <code className="bg-slate-100 text-slate-800 px-1 py-0.5 rounded text-[10px] font-mono font-bold">0.0.0.0/0</code> (this allows secure authentication handshakes from any cloud host like Render)</li>
+                           <li>Click <strong>Save changes</strong>. Your services will immediately finish handshaking and activate direct live synchronization!</li>
+                         </ol>
+                       </div>
+                     )}
+                   </div>
+                 )}
               </div>
             </div>
 
