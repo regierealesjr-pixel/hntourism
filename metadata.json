@@ -1,0 +1,6 @@
+{
+  "name": "Hinunangan Tourism Survey System",
+  "description": "Multi-role tourist experience satisfaction survey system for Hinunangan, Southern Leyte, featuring Tourism Admin, Staff assistance, and Tourist feedback reporting with Gemini AI advisory integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
