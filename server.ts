@@ -346,8 +346,16 @@ async function initMySQL() {
     };
 
     if (mysqlUrl) {
+      let cleanUrl = mysqlUrl;
+      try {
+        const u = new URL(mysqlUrl);
+        u.searchParams.delete("ssl-mode");
+        u.searchParams.delete("sslmode");
+        cleanUrl = u.toString();
+      } catch (e) {}
+
       pool = mysql.createPool({
-        uri: mysqlUrl,
+        uri: cleanUrl,
         ...connectionOptions
       });
       // Try to parse host info for status page
