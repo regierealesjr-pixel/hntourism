@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, UserRole } from '../types';
 import { Waves, KeyRound, User as UserIcon, Globe, MapPin, Sparkles, HelpCircle, AlertCircle, CheckCircle } from 'lucide-react';
 import { motion } from 'motion/react';
+import hinunanganParadiseImg from '../assets/images/hinunangan_paradise_1779325004774.png';
 
 interface LoginPageProps {
   onLogin: (user: User) => void;
@@ -188,7 +189,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             <div className="rounded-2xl border border-slate-200 overflow-hidden shadow-xs bg-white">
               <div className="h-40 overflow-hidden relative">
                 <img 
-                  src="/src/assets/images/hinunangan_paradise_1779325004774.png" 
+                  src={hinunanganParadiseImg} 
                   alt="Beautiful Twin Islands of Hinunangan, Southern Leyte" 
                   className="w-full h-full object-cover hover:scale-105 transition-transform duration-500"
                   referrerPolicy="no-referrer"

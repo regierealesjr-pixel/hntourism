@@ -6,6 +6,7 @@ import {
   Smile, User as UserIcon, CheckCircle, Ship, Award, 
   ChevronRight, Calendar, MessageSquare, Sparkles 
 } from 'lucide-react';
+import hinunanganParadiseImg from '../assets/images/hinunangan_paradise_1779325004774.png';
 
 interface TouristPanelProps {
   currentUser?: User | null;
@@ -133,7 +134,7 @@ export default function TouristPanel({
       <div className="bg-sky-950 text-white rounded-2xl p-8 crisp-shadow relative overflow-hidden min-h-[16rem] flex flex-col justify-end">
         {/* Real Hinunangan background image cover */}
         <img 
-          src="/src/assets/images/hinunangan_paradise_1779325004774.png" 
+          src={hinunanganParadiseImg} 
           alt="Hinunangan twins island panorama" 
           className="absolute inset-0 w-full h-full object-cover opacity-25 select-none pointer-events-none"
           referrerPolicy="no-referrer"

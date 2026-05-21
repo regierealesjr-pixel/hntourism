@@ -54,6 +54,22 @@ function initDB() {
           needsWrite = true;
         }
       }
+      // Ensure Calagitan Beach exists in destinations
+      if (parsed.destinations) {
+        const hasCalagitan = parsed.destinations.some((d: any) => d.id === "dest-7" || d.name.toLowerCase().includes("calagitan"));
+        if (!hasCalagitan) {
+          parsed.destinations.push({
+            id: "dest-7",
+            name: "Calagitan Beach",
+            category: "Beach",
+            description: "A gorgeous cream-sand shoreline known for its active waves, dynamic surfing conditions, and friendly local cottages. Popular for beachcombing and scenic sunset gatherings.",
+            location: "Brgy. Calagitan, Hinunangan",
+            averageRating: 4.6,
+            totalReviews: 4
+          });
+          needsWrite = true;
+        }
+      }
       if (needsWrite) {
         fs.writeFileSync(DB_FILE, JSON.stringify(parsed, null, 2), "utf-8");
       }
@@ -120,6 +136,15 @@ function initDB() {
         location: "Poblacion, Hinunangan",
         averageRating: 4.0,
         totalReviews: 2
+      },
+      {
+        id: "dest-7",
+        name: "Calagitan Beach",
+        category: "Beach",
+        description: "A gorgeous cream-sand shoreline known for its active waves, dynamic surfing conditions, and friendly local cottages. Popular for beachcombing and scenic sunset gatherings.",
+        location: "Brgy. Calagitan, Hinunangan",
+        averageRating: 4.6,
+        totalReviews: 4
       }
     ],
     questions: [
@@ -928,6 +953,7 @@ async function resetMySQL() {
       await pool.query("DROP TABLE IF EXISTS db_logs");
       await pool.query("DROP TABLE IF EXISTS db_ai_reports");
       await bootstrapMySQLSchema();
+      await seedMySQLIfNecessary();
       console.log("MySQL Database: Reset of cloud tables completed successfully.");
     } catch (e) {
       console.error("MySQL Database resetMySQL error", e);
